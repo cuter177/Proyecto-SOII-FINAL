@@ -1,249 +1,225 @@
 import org.apache.pdfbox.pdmodel.PDDocument;
 
-import java.io.*;
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.nio.file.*;
 import java.time.DayOfWeek;
 import java.util.*;
 
 public class Generador {
 
-    private static final Path CARPETA_PDF = Paths.get("src/main/resources/pdf/");
+    private static final Path CARPETA_PDF =
+            Paths.get("src/main/resources/pdf/");
 
-    // Línea del archivo .txt en la que se escribirán datos falsos (1-indexed)
-    private static final int LINEA_CORRUPCION = 5;
-
-    private int contadorLineas = 0;
-
-    private volatile boolean internetCaido = false;
-    private volatile boolean cancelado = false;
+    private static final Path ARCHIVO_SALIDA =
+            Paths.get("horarios.txt");
 
     public void ejecutar() throws Exception {
 
         System.out.println("El programa iniciará en 3 segundos.");
-        System.out.println("ENTER para interrumpir el proceso");
+        System.out.println("Presiona [ENTER] en cualquier momento para cancelar...");
 
-        // Hilo para detectar teclas
-        Thread hiloTeclado = new Thread(() -> {
+        // Hilo para vigilar el teclado y permitir la interrupción del programa
+        Thread hiloInterrupcion = new Thread(() -> {
             try {
-                while (true) {
-                    int tecla = System.in.read();
-
-                    if (tecla == '\n') { // ENTER
-                        cancelado = true;
-                        System.out.println("\n[!] Ejecución cancelada.");
-                        System.exit(0);
-                    }
-
-                    if (tecla == 'v' || tecla == 'V') {
-                        internetCaido = true;
-                        System.out.println("\n[!] Internet caído...");
-                        break;
-                    }
+                if (System.in.read() != -1) { 
+                    System.out.println("\n[!] Ejecución cancelada por el usuario.");
+                    System.exit(0);
                 }
             } catch (Exception e) {
             }
         });
+        
+        // Al ser Daemon, este hilo morirá automáticamente cuando el programa termine
+        hiloInterrupcion.setDaemon(true); 
+        hiloInterrupcion.start();
 
-        hiloTeclado.setDaemon(true);
-        hiloTeclado.start();
-
-        // Cuenta regresiva
+        // El hilo principal hace la cuenta regresiva
         for (int i = 3; i > 0; i--) {
-            if (cancelado)
-                return;
             System.out.print(i + "... ");
             Thread.sleep(1000);
         }
-
         System.out.println("\n¡Iniciando procesamiento!\n");
 
         Path rutaSalida = SelectorDestino.pedirRutaAlUsuario("horarios.txt");
 
         if (rutaSalida == null) {
-            System.out.println("Proceso cancelado.");
+        System.out.println("Proceso cancelado por el usuario.");
+        return;
+        }
+
+        List<Alumno> alumnos;
+        try {
+            alumnos = cargarAlumnosDesdePDF();
+        } catch (RuntimeException e) {
+            System.err.println("[!] Proceso terminado.");
             return;
         }
 
-        try (OutputStream out = Files.newOutputStream(
+        /* Se reemplazo ARCHIVO_SALIDA por rutaSalida */
+        try (BufferedWriter writer = Files.newBufferedWriter(
                 rutaSalida,
                 StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING)) {
+                StandardOpenOption.TRUNCATE_EXISTING
+        )) {
 
-            procesarYEscribir(out);
-
+            escribirHorariosAlumnos(alumnos, writer);
+            writer.newLine();
+            escribirHorariosLibres(alumnos, writer);
         }
     }
 
     // =======================
-    // PROCESO EN TIEMPO REAL
+    // Cargar alumnos
     // =======================
-    private void procesarYEscribir(OutputStream out) throws Exception {
+
+    /*
+    private List<Alumno> cargarAlumnosDesdePDF() throws Exception {
 
         if (!Files.exists(CARPETA_PDF)) {
             throw new RuntimeException("No existe la carpeta de PDFs");
         }
 
-        List<Alumno> alumnosProcesados = new ArrayList<>();
+        List<Alumno> alumnos = new ArrayList<>();
 
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(CARPETA_PDF, "*.pdf")) {
+        try (DirectoryStream<Path> stream =
+                     Files.newDirectoryStream(CARPETA_PDF, "*.pdf")) {
 
             for (Path pdf : stream) {
-
-                if (internetCaido) {
-                    escribirLinea(out, "\nHORARIOS LIBRES COMUNES");
-                    escribirLinea(out, "  [DATOS INCOMPLETOS]");
-                    escribirCorrupcionTotal(out);
-                    return;
-                }
-
-                System.out.println("Procesando: " + pdf.getFileName());
 
                 try (PDDocument doc = PDDocument.load(pdf.toFile())) {
 
                     PDFHorarioStripper stripper = new PDFHorarioStripper();
                     stripper.getText(doc);
 
-                    Alumno alumno = new Alumno(
+                    alumnos.add(new Alumno(
                             stripper.getNombreAlumno(),
-                            stripper.getHorario());
-
-                    alumnosProcesados.add(alumno);
-
-                    escribirAlumno(alumno, out);
-
-                } catch (Exception e) {
-                    System.err.println("[!] Error en: " + pdf.getFileName());
+                            stripper.getHorario()
+                    ));
                 }
             }
         }
 
-        // SOLO si terminó correctamente
-        escribirLinea(out, "\nHORARIOS LIBRES COMUNES");
+        return alumnos;
+    }
+    */
+   private List<Alumno> cargarAlumnosDesdePDF() throws Exception {
 
-        Map<DayOfWeek, List<Intervalo>> libres = HorarioUtils.horariosLibres(alumnosProcesados);
+        if (!Files.exists(CARPETA_PDF)) {
+            throw new RuntimeException("No existe la carpeta de PDFs");
+        }
 
-        for (DayOfWeek dia : diasSemana()) {
+        List<Alumno> alumnos = new ArrayList<>();
 
-            escribirLinea(out, "  " + diaEnEspanol(dia) + ":");
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(CARPETA_PDF, "*.pdf")) {
+            for (Path pdf : stream) {
+                System.out.println("Procesando: " + pdf.getFileName());
 
-            List<Intervalo> intervalos = libres.get(dia);
-
-            if (intervalos == null || intervalos.isEmpty()) {
-                escribirLinea(out, "    N/H");
-                continue;
-            }
-
-            for (Intervalo i : intervalos) {
-                escribirLinea(out, "    " + i);
+                try {
+                    try (PDDocument doc = PDDocument.load(pdf.toFile())) {
+                        PDFHorarioStripper stripper = new PDFHorarioStripper();
+                        stripper.getText(doc);
+                        alumnos.add(new Alumno(stripper.getNombreAlumno(), stripper.getHorario()));
+                    }
+                } catch (IOException e) {
+                    System.err.println("\n[!] Error fatal:");
+                    System.err.println("[!] PDF no valido: " + pdf.getFileName());
+                    System.err.println("[!] Detalle: " + e.getMessage());
+                    System.err.println("[!] Se cancela toda la ejecucion.\n");
+                    throw new RuntimeException(
+                            "Proceso cancelado por archivo PDF no valido: " + pdf.getFileName(),
+                            e
+                    );
+                }
             }
         }
+        return alumnos;
     }
 
     // =======================
-    // ESCRIBIR ALUMNO
+    // Escribir alumnos
     // =======================
-    private void escribirAlumno(Alumno a, OutputStream out) throws Exception {
+    private void escribirHorariosAlumnos(
+            List<Alumno> alumnos,
+            BufferedWriter writer
+    ) throws Exception {
 
-        escribirLinea(out, "[" + a.getNombreCompleto() + "]");
+        for (Alumno a : alumnos) {
+            escribirAlumno(a, writer);
+            writer.newLine();
+        }
+    }
+
+    private void escribirAlumno(Alumno a, BufferedWriter writer)
+            throws Exception {
+
+        writer.write("[" + a.getNombreCompleto() + "]");
+        writer.newLine();
 
         for (DayOfWeek dia : diasSemana()) {
 
-            if (internetCaido) {
-                escribirCorrupcionTotal(out);
-                return;
-            }
-
-            escribirLinea(out, "  " + diaEnEspanol(dia) + ":");
+            writer.write("  " + diaEnEspanol(dia) + ":");
+            writer.newLine();
 
             var clases = a.getHorario().get(dia);
 
             if (clases == null || clases.isEmpty()) {
-                escribirLinea(out, "    N/H");
+                writer.write("    N/H");
+                writer.newLine();
                 continue;
             }
 
             clases.sort(Comparator.comparing(
-                    c -> c.getIntervalo().inicio));
+                    c -> c.getIntervalo().inicio
+            ));
 
             for (ClaseHorario c : clases) {
-
-                if (internetCaido) {
-                    escribirCorrupcionParcial(out);
-                    escribirCorrupcionTotal(out);
-                    return;
-                }
-
-                escribirLinea(out,
-                        "    " +
-                                c.getIntervalo().inicio + "-" +
-                                c.getIntervalo().fin + "  " +
-                                c.getNombreMateria());
-
-                Thread.sleep(200);
+                writer.write("    " +
+                        c.getIntervalo().inicio + "-" +
+                        c.getIntervalo().fin + "  " +
+                        c.getNombreMateria()
+                );
+                writer.newLine();
             }
         }
     }
 
     // =======================
-    // ESCRITURA
+    // Horarios libres
     // =======================
-    private void escribirLinea(OutputStream out, String texto) throws Exception {
-        contadorLineas++;
-        // Si esta es la línea marcada para corrupción, sustituir por datos falsos
-        if (contadorLineas == LINEA_CORRUPCION) {
-            texto = "    " + horaFalsa() + "-" + horaFalsa() + "  " + materiaFalsa();
+    private void escribirHorariosLibres(
+            List<Alumno> alumnos,
+            BufferedWriter writer
+    ) throws Exception {
+
+        writer.write("HORARIOS LIBRES COMUNES");
+        writer.newLine();
+
+        Map<DayOfWeek, List<Intervalo>> libres =
+                HorarioUtils.horariosLibres(alumnos);
+
+        for (DayOfWeek dia : diasSemana()) {
+
+            writer.write("  " + diaEnEspanol(dia) + ":");
+            writer.newLine();
+
+            List<Intervalo> intervalos = libres.get(dia);
+
+            if (intervalos == null || intervalos.isEmpty()) {
+                writer.write("    N/H");
+                writer.newLine();
+                continue;
+            }
+
+            for (Intervalo i : intervalos) {
+                writer.write("    " + i);
+                writer.newLine();
+            }
         }
-        out.write((texto + "\n").getBytes());
     }
 
     // =======================
-    // CORRUPCIÓN
-    // =======================
-    private void escribirCorrupcionParcial(OutputStream out) throws Exception {
-
-        // Corrupción parcial
-
-        byte[] basura = new byte[20];
-        new Random().nextBytes(basura);
-
-        out.write(basura);
-    }
-
-    private void escribirCorrupcionTotal(OutputStream out) throws Exception {
-
-        // Escribiendo resto corrupto...
-
-        byte[] basura = new byte[1000];
-        new Random().nextBytes(basura);
-
-        out.write(basura);
-
-        out.flush();
-    }
-
-    // =======================
-    // DATOS FALSOS
-    // =======================
-    private static final String[] MATERIAS_FALSAS = {
-        "Somnolencia Fisica", "Filosofia Medieval", "Cocina Molecular",
-        "Ingenieria en Tiktok", "Folclor milagroso", "Economia de Marte",
-        "Latin Lover", "Tanatologia", "Sociologia Perruna",
-        "Botanica Aerea", "Derecho Galactico", "Etica no tan Etica",
-        "Musica de TikTok", "Arquitectura de Anime", "Paleografia (De paletas)"
-    };
-
-    private String horaFalsa() {
-        int hora = new Random().nextInt(30) + 20; // e.g. 20 a 49
-        int minuto = new Random().nextBoolean() ? 0 : 30;
-        return String.format("%d:%02d", hora, minuto);
-    }
-
-    private String materiaFalsa() {
-        return MATERIAS_FALSAS[new Random().nextInt(MATERIAS_FALSAS.length)];
-    }
-
-    // =======================
-    // UTILIDADES
+    // Utilidades
     // =======================
     private List<DayOfWeek> diasSemana() {
         return List.of(
@@ -251,7 +227,8 @@ public class Generador {
                 DayOfWeek.TUESDAY,
                 DayOfWeek.WEDNESDAY,
                 DayOfWeek.THURSDAY,
-                DayOfWeek.FRIDAY);
+                DayOfWeek.FRIDAY
+        );
     }
 
     private String diaEnEspanol(DayOfWeek d) {
@@ -265,3 +242,4 @@ public class Generador {
         };
     }
 }
+
