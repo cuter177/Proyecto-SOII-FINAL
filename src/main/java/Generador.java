@@ -2,6 +2,8 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.Console;
+
 import java.nio.file.*;
 import java.time.DayOfWeek;
 import java.util.*;
@@ -24,18 +26,22 @@ public class Generador {
     Paths.get("src/main/resources/pdf/");
 
   private final Lock lockArchivo =
-            new ReentrantLock();
+    new ReentrantLock();
 
   private static final Path ARCHIVO_SALIDA =
     Paths.get("horarios.txt");
 
+  private static final String USUARIO_CORRECTO = "admin";
+  private static final String PASSWORD_CORRECTA = "horarios2026";
+
   public void ejecutar() throws Exception {
+    if (!autenticar()) return;
+
     System.out.println("El programa iniciará en 3 segundos.");
     System.out.println("Presiona [ENTER] en cualquier momento para cancelar...");
 
     Thread hiloInterrupcion = new Thread(() -> {
       try {
-        // System.in.read() ignora interrupciones; este canal sí las respeta
         ReadableByteChannel canal = Channels.newChannel(System.in);
         ByteBuffer buffer = ByteBuffer.allocate(1);
         if (canal.read(buffer) != -1) {
@@ -60,17 +66,29 @@ public class Generador {
 
     Path rutaSalida = SelectorDestino.pedirRutaAlUsuario("horarios.txt");
     if (rutaSalida == null) {
-      System.out.println("Proceso cancelado por el usuario.");
+      System.out.println("[DEBUG] rutaSalida es null — proceso cancelado por el usuario.");
       return;
     }
+
+    // ─── Validación 2: permisos de escritura en el destino ───────────────────
+    System.out.println("[DEBUG] Verificando permisos de escritura en: " + rutaSalida);
+    Path destino = Files.exists(rutaSalida) ? rutaSalida : rutaSalida.getParent();
+    if (destino != null && !Files.isWritable(destino)) {
+      System.err.println("[!] Sin permisos de escritura en el destino: " + destino);
+      return;
+    }
+    System.out.println("[DEBUG] Permisos de escritura OK.");
+    // ─────────────────────────────────────────────────────────────────────────
 
     List<Alumno> alumnos;
     try {
       alumnos = cargarAlumnosDesdePDF();
     } catch (RuntimeException e) {
-      System.err.println("[!] Proceso terminado.");
+      System.err.println("[!] Proceso terminado: " + e.getMessage());
       return;
     }
+
+    System.out.println("[DEBUG] Total de alumnos cargados: " + alumnos.size());
 
     try (BufferedWriter writer = Files.newBufferedWriter(
           rutaSalida,
@@ -79,47 +97,29 @@ public class Generador {
       escribirHorariosAlumnos(alumnos, writer);
       writer.newLine();
       escribirHorariosLibres(alumnos, writer);
+      System.out.println("[DEBUG] Archivo escrito correctamente en: " + rutaSalida);
           }
   }
+
   // =======================
   // Cargar alumnos
   // =======================
-
-  /*
-     private List<Alumno> cargarAlumnosDesdePDF() throws Exception {
-
-     if (!Files.exists(CARPETA_PDF)) {
-     throw new RuntimeException("No existe la carpeta de PDFs");
-     }
-
-     List<Alumno> alumnos = new ArrayList<>();
-
-     try (DirectoryStream<Path> stream =
-     Files.newDirectoryStream(CARPETA_PDF, "*.pdf")) {
-
-     for (Path pdf : stream) {
-
-     try (PDDocument doc = PDDocument.load(pdf.toFile())) {
-
-     PDFHorarioStripper stripper = new PDFHorarioStripper();
-     stripper.getText(doc);
-
-     alumnos.add(new Alumno(
-     stripper.getNombreAlumno(),
-     stripper.getHorario()
-     ));
-     }
-     }
-     }
-
-     return alumnos;
-     }
-     */
   private List<Alumno> cargarAlumnosDesdePDF() throws Exception {
 
+    // ─── Validación 1a: la carpeta existe ────────────────────────────────────
     if (!Files.exists(CARPETA_PDF)) {
+      System.err.println("[DEBUG] La carpeta no existe: " + CARPETA_PDF.toAbsolutePath());
       throw new RuntimeException("No existe la carpeta de PDFs");
     }
+
+    // ─── Validación 1b: es realmente un directorio ───────────────────────────
+    if (!Files.isDirectory(CARPETA_PDF)) {
+      System.err.println("[DEBUG] La ruta existe pero no es un directorio: " + CARPETA_PDF.toAbsolutePath());
+      throw new RuntimeException("La ruta de PDFs no es un directorio válido");
+    }
+
+    System.out.println("[DEBUG] Carpeta de PDFs validada: " + CARPETA_PDF.toAbsolutePath());
+    // ─────────────────────────────────────────────────────────────────────────
 
     List<Alumno> alumnos = new ArrayList<>();
 
@@ -147,6 +147,10 @@ public class Generador {
       }
         }
 
+    if (futures.isEmpty()) {
+      System.out.println("[DEBUG] No se encontraron archivos PDF en: " + CARPETA_PDF.toAbsolutePath());
+    }
+
     // Esperar resultados
     for (Future<Alumno> future : futures) {
 
@@ -156,6 +160,9 @@ public class Generador {
 
         if (alumno != null) {
           alumnos.add(alumno);
+          System.out.println("[DEBUG] Alumno añadido: " + alumno.getNombreCompleto());
+        } else {
+          System.out.println("[DEBUG] Una tarea devolvió null — PDF ignorado.");
         }
 
       } catch (Exception e) {
@@ -170,9 +177,13 @@ public class Generador {
 
     try {
       if (!pool.awaitTermination(10, TimeUnit.SECONDS)) {
+        System.err.println("[DEBUG] El pool no terminó en 10 segundos — forzando cierre.");
         pool.shutdownNow();
+      } else {
+        System.out.println("[DEBUG] Pool de hilos cerrado correctamente.");
       }
     } catch (InterruptedException e) {
+      System.err.println("[DEBUG] Interrupción al esperar el pool — forzando cierre.");
       pool.shutdownNow();
       Thread.currentThread().interrupt();
     }
@@ -285,5 +296,29 @@ public class Generador {
         default -> "";
     };
   }
-}
 
+  private boolean autenticar() {
+    Console consola = System.console();
+    if (consola == null) {
+      System.err.println("[!] No se puede acceder a la consola para autenticación.");
+      return false;
+    }
+
+    String usuario = consola.readLine("Usuario: ");
+    if (usuario == null || !usuario.equals(USUARIO_CORRECTO)) {
+      System.err.println("[!] Usuario incorrecto. Acceso denegado.");
+      return false;
+    }
+
+    char[] password = consola.readPassword("Contraseña: ");
+    if (password == null || !new String(password).equals(PASSWORD_CORRECTA)) {
+      System.err.println("[!] Contraseña incorrecta. Acceso denegado.");
+      Arrays.fill(password, '0');
+      return false;
+    }
+
+    Arrays.fill(password, '0');
+    System.out.println("[DEBUG] Autenticación exitosa. Bienvenido, " + usuario + ".");
+    return true;
+  }
+}
