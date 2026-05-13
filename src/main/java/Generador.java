@@ -37,6 +37,15 @@ public class Generador {
   public void ejecutar() throws Exception {
     if (!autenticar()) return;
 
+    // ─── Menú de algoritmo de planificación ──────────────────────────────────
+    AlgoritmoScheduler scheduler = elegirAlgoritmo();
+    if (scheduler == null) {
+      System.out.println("[!] Algoritmo no válido. Proceso cancelado.");
+      return;
+    }
+    System.out.println("[DEBUG] Algoritmo seleccionado: " + scheduler.getNombre());
+    // ─────────────────────────────────────────────────────────────────────────
+
     System.out.println("El programa iniciará en 3 segundos.");
     System.out.println("Presiona [ENTER] en cualquier momento para cancelar...");
 
@@ -70,7 +79,7 @@ public class Generador {
       return;
     }
 
-    // ─── Validación 2: permisos de escritura en el destino ───────────────────
+    // ─── Validación: permisos de escritura en el destino ─────────────────────
     System.out.println("[DEBUG] Verificando permisos de escritura en: " + rutaSalida);
     Path destino = Files.exists(rutaSalida) ? rutaSalida : rutaSalida.getParent();
     if (destino != null && !Files.isWritable(destino)) {
@@ -80,6 +89,19 @@ public class Generador {
     System.out.println("[DEBUG] Permisos de escritura OK.");
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ─── Cargar lista de PDFs y ejecutar con el scheduler elegido ────────────
+    List<Path> pdfs = listarPDFs();
+    if (pdfs.isEmpty()) {
+      System.err.println("[!] No se encontraron archivos PDF. Proceso terminado.");
+      return;
+    }
+
+    List<Path> pdfsOrdenados = scheduler.ordenar(pdfs);
+    List<MetricaPDF> metricas = scheduler.ejecutar(pdfsOrdenados);
+    imprimirTablaMetricas(scheduler.getNombre(), metricas);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ─── Cargar alumnos y escribir archivo de salida ──────────────────────────
     List<Alumno> alumnos;
     try {
       alumnos = cargarAlumnosDesdePDF();
@@ -98,7 +120,95 @@ public class Generador {
       writer.newLine();
       escribirHorariosLibres(alumnos, writer);
       System.out.println("[DEBUG] Archivo escrito correctamente en: " + rutaSalida);
-          }
+    }
+  }
+
+  // =======================
+  // Menú de algoritmo
+  // =======================
+  private AlgoritmoScheduler elegirAlgoritmo() {
+    System.out.println("\n╔══════════════════════════════════════════╗");
+    System.out.println("║   Algoritmo de planificación de CPU      ║");
+    System.out.println("╠══════════════════════════════════════════╣");
+    System.out.println("║  [1] FCFS  - First Come, First Served    ║");
+    System.out.println("║  [2] SJF   - Shortest Job First          ║");
+    System.out.println("║  [3] RR    - Round Robin (quantum=150ms) ║");
+    System.out.println("╚══════════════════════════════════════════╝");
+    System.out.print("Selecciona una opción [1-3]: ");
+
+    Scanner scanner = new Scanner(System.in);
+    String opcion = scanner.nextLine().trim();
+
+    return switch (opcion) {
+      case "1" -> new FCFSScheduler();
+      case "2" -> new SJFScheduler();
+      case "3" -> new RoundRobinScheduler();
+      default  -> null;
+    };
+  }
+
+  // =======================
+  // Listar PDFs
+  // =======================
+  private List<Path> listarPDFs() throws Exception {
+
+    // ─── Validación: la carpeta existe ───────────────────────────────────────
+    if (!Files.exists(CARPETA_PDF)) {
+      System.err.println("[DEBUG] La carpeta no existe: " + CARPETA_PDF.toAbsolutePath());
+      throw new RuntimeException("No existe la carpeta de PDFs");
+    }
+
+    // ─── Validación: es realmente un directorio ───────────────────────────────
+    if (!Files.isDirectory(CARPETA_PDF)) {
+      System.err.println("[DEBUG] La ruta existe pero no es un directorio: " + CARPETA_PDF.toAbsolutePath());
+      throw new RuntimeException("La ruta de PDFs no es un directorio válido");
+    }
+
+    System.out.println("[DEBUG] Carpeta de PDFs validada: " + CARPETA_PDF.toAbsolutePath());
+
+    List<Path> pdfs = new ArrayList<>();
+    try (DirectoryStream<Path> stream =
+        Files.newDirectoryStream(CARPETA_PDF, "*.pdf")) {
+      for (Path pdf : stream) {
+        pdfs.add(pdf);
+        System.out.println("[DEBUG] PDF encontrado: " + pdf.getFileName());
+      }
+    }
+    return pdfs;
+  }
+
+  // =======================
+  // Tabla de métricas
+  // =======================
+  private void imprimirTablaMetricas(String algoritmo, List<MetricaPDF> metricas) {
+    System.out.println("\n╔══════════════════════════════════════════════════════════════════════════════════════╗");
+    System.out.printf( "║  Métricas de planificación — %-54s ║%n", algoritmo);
+    System.out.println("╠═══════════════════════════╦═══════════╦═══════════╦═══════════╦════════════╦═════════╣");
+    System.out.println("║ Archivo                   ║ Llegada   ║ Inicio    ║ Fin       ║ Espera     ║ Turnar. ║");
+    System.out.println("╠═══════════════════════════╬═══════════╬═══════════╬═══════════╬════════════╬═════════╣");
+
+    long base = metricas.isEmpty() ? 0 : metricas.get(0).getLlegada();
+
+    for (MetricaPDF m : metricas) {
+      System.out.printf("║ %-25s ║ %6dms  ║ %6dms  ║ %6dms  ║ %7dms  ║ %4dms  ║%n",
+        m.getNombreArchivo().length() > 25
+          ? m.getNombreArchivo().substring(0, 22) + "..."
+          : m.getNombreArchivo(),
+        m.getLlegada()  - base,
+        m.getInicio()   - base,
+        m.getFin()      - base,
+        m.getEspera(),
+        m.getTurnaround()
+      );
+    }
+
+    System.out.println("╠═══════════════════════════╩═══════════╩═══════════╩═══════════╩════════════╩═════════╣");
+
+    long esperaprom    = (long) metricas.stream().mapToLong(MetricaPDF::getEspera).average().orElse(0);
+    long turnaroundprom = (long) metricas.stream().mapToLong(MetricaPDF::getTurnaround).average().orElse(0);
+
+    System.out.printf( "║  Promedio — Espera: %dms   Turnaround: %dms%n", esperaprom, turnaroundprom);
+    System.out.println("╚══════════════════════════════════════════════════════════════════════════════════════╝\n");
   }
 
   // =======================
@@ -106,75 +216,45 @@ public class Generador {
   // =======================
   private List<Alumno> cargarAlumnosDesdePDF() throws Exception {
 
-    // ─── Validación 1a: la carpeta existe ────────────────────────────────────
     if (!Files.exists(CARPETA_PDF)) {
-      System.err.println("[DEBUG] La carpeta no existe: " + CARPETA_PDF.toAbsolutePath());
       throw new RuntimeException("No existe la carpeta de PDFs");
     }
-
-    // ─── Validación 1b: es realmente un directorio ───────────────────────────
     if (!Files.isDirectory(CARPETA_PDF)) {
-      System.err.println("[DEBUG] La ruta existe pero no es un directorio: " + CARPETA_PDF.toAbsolutePath());
       throw new RuntimeException("La ruta de PDFs no es un directorio válido");
     }
 
-    System.out.println("[DEBUG] Carpeta de PDFs validada: " + CARPETA_PDF.toAbsolutePath());
-    // ─────────────────────────────────────────────────────────────────────────
-
     List<Alumno> alumnos = new ArrayList<>();
 
-    // Pool de hilos
-    ExecutorService pool =
-      Executors.newFixedThreadPool(4);
-
-    // Lista de tareas
-    List<Future<Alumno>> futures =
-      new ArrayList<>();
+    ExecutorService pool = Executors.newFixedThreadPool(4);
+    List<Future<Alumno>> futures = new ArrayList<>();
 
     try (DirectoryStream<Path> stream =
         Files.newDirectoryStream(CARPETA_PDF, "*.pdf")) {
-
       for (Path pdf : stream) {
-
-        System.out.println(
-            "[MAIN] Enviando tarea: "
-            + pdf.getFileName());
-
-        ProcesadorPDFTask tarea =
-          new ProcesadorPDFTask(pdf);
-
-        futures.add(pool.submit(tarea));
+        System.out.println("[MAIN] Enviando tarea: " + pdf.getFileName());
+        futures.add(pool.submit(new ProcesadorPDFTask(pdf)));
       }
-        }
+    }
 
     if (futures.isEmpty()) {
       System.out.println("[DEBUG] No se encontraron archivos PDF en: " + CARPETA_PDF.toAbsolutePath());
     }
 
-    // Esperar resultados
     for (Future<Alumno> future : futures) {
-
       try {
-
         Alumno alumno = future.get();
-
         if (alumno != null) {
           alumnos.add(alumno);
           System.out.println("[DEBUG] Alumno añadido: " + alumno.getNombreCompleto());
         } else {
           System.out.println("[DEBUG] Una tarea devolvió null — PDF ignorado.");
         }
-
       } catch (Exception e) {
-
-        System.err.println(
-            "[!] Error procesando PDF: "
-            + e.getMessage());
+        System.err.println("[!] Error procesando PDF: " + e.getMessage());
       }
     }
 
     pool.shutdown();
-
     try {
       if (!pool.awaitTermination(10, TimeUnit.SECONDS)) {
         System.err.println("[DEBUG] El pool no terminó en 10 segundos — forzando cierre.");
@@ -196,47 +276,39 @@ public class Generador {
   // =======================
   private void escribirHorariosAlumnos(
       List<Alumno> alumnos,
-      BufferedWriter writer
-      ) throws Exception {
-
+      BufferedWriter writer) throws Exception {
     for (Alumno a : alumnos) {
       escribirAlumno(a, writer);
       writer.newLine();
     }
-      }
+  }
 
-  private void escribirAlumno(Alumno a, BufferedWriter writer)
-      throws Exception {
+  private void escribirAlumno(Alumno a, BufferedWriter writer) throws Exception {
+    writer.write("[" + a.getNombreCompleto() + "]");
+    writer.newLine();
 
-      writer.write("[" + a.getNombreCompleto() + "]");
+    for (DayOfWeek dia : diasSemana()) {
+      writer.write("  " + diaEnEspanol(dia) + ":");
       writer.newLine();
 
-      for (DayOfWeek dia : diasSemana()) {
+      var clases = a.getHorario().get(dia);
 
-        writer.write("  " + diaEnEspanol(dia) + ":");
+      if (clases == null || clases.isEmpty()) {
+        writer.write("    N/H");
         writer.newLine();
-
-        var clases = a.getHorario().get(dia);
-
-        if (clases == null || clases.isEmpty()) {
-          writer.write("    N/H");
-          writer.newLine();
-          continue;
-        }
-
-        clases.sort(Comparator.comparing(
-              c -> c.getIntervalo().inicio
-              ));
-
-        for (ClaseHorario c : clases) {
-          writer.write("    " +
-              c.getIntervalo().inicio + "-" +
-              c.getIntervalo().fin + "  " +
-              c.getNombreMateria()
-              );
-          writer.newLine();
-        }
+        continue;
       }
+
+      clases.sort(Comparator.comparing(c -> c.getIntervalo().inicio));
+
+      for (ClaseHorario c : clases) {
+        writer.write("    " +
+            c.getIntervalo().inicio + "-" +
+            c.getIntervalo().fin + "  " +
+            c.getNombreMateria());
+        writer.newLine();
+      }
+    }
   }
 
   // =======================
@@ -244,8 +316,7 @@ public class Generador {
   // =======================
   private void escribirHorariosLibres(
       List<Alumno> alumnos,
-      BufferedWriter writer
-      ) throws Exception {
+      BufferedWriter writer) throws Exception {
 
     writer.write("HORARIOS LIBRES COMUNES");
     writer.newLine();
@@ -254,12 +325,10 @@ public class Generador {
       HorarioUtils.horariosLibres(alumnos);
 
     for (DayOfWeek dia : diasSemana()) {
-
       writer.write("  " + diaEnEspanol(dia) + ":");
       writer.newLine();
 
       List<Intervalo> intervalos = libres.get(dia);
-
       if (intervalos == null || intervalos.isEmpty()) {
         writer.write("    N/H");
         writer.newLine();
@@ -271,7 +340,7 @@ public class Generador {
         writer.newLine();
       }
     }
-      }
+  }
 
   // =======================
   // Utilidades
@@ -282,21 +351,23 @@ public class Generador {
         DayOfWeek.TUESDAY,
         DayOfWeek.WEDNESDAY,
         DayOfWeek.THURSDAY,
-        DayOfWeek.FRIDAY
-        );
+        DayOfWeek.FRIDAY);
   }
 
   private String diaEnEspanol(DayOfWeek d) {
     return switch (d) {
-      case MONDAY -> "Lunes";
-      case TUESDAY -> "Martes";
+      case MONDAY    -> "Lunes";
+      case TUESDAY   -> "Martes";
       case WEDNESDAY -> "Miércoles";
-      case THURSDAY -> "Jueves";
-      case FRIDAY -> "Viernes";
-        default -> "";
+      case THURSDAY  -> "Jueves";
+      case FRIDAY    -> "Viernes";
+      default        -> "";
     };
   }
 
+  // =======================
+  // Autenticación
+  // =======================
   private boolean autenticar() {
     Console consola = System.console();
     if (consola == null) {
