@@ -8,44 +8,57 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.TimeUnit;
+
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.ReadableByteChannel;
+
 
 public class Generador {
 
   private static final Path CARPETA_PDF =
     Paths.get("src/main/resources/pdf/");
 
+  private final Lock lockArchivo =
+            new ReentrantLock();
+
   private static final Path ARCHIVO_SALIDA =
     Paths.get("horarios.txt");
 
   public void ejecutar() throws Exception {
-
     System.out.println("El programa iniciará en 3 segundos.");
     System.out.println("Presiona [ENTER] en cualquier momento para cancelar...");
 
-    // Hilo para vigilar el teclado y permitir la interrupción del programa
     Thread hiloInterrupcion = new Thread(() -> {
       try {
-        if (System.in.read() != -1) { 
+        // System.in.read() ignora interrupciones; este canal sí las respeta
+        ReadableByteChannel canal = Channels.newChannel(System.in);
+        ByteBuffer buffer = ByteBuffer.allocate(1);
+        if (canal.read(buffer) != -1) {
           System.out.println("\n[!] Ejecución cancelada por el usuario.");
           System.exit(0);
         }
+      } catch (ClosedByInterruptException e) {
+        // Maven interrumpió el hilo limpiamente — comportamiento esperado
       } catch (Exception e) {
+        // Ignorado intencionalmente
       }
     });
-
-    // Al ser Daemon, este hilo morirá automáticamente cuando el programa termine
-    hiloInterrupcion.setDaemon(true); 
+    hiloInterrupcion.setDaemon(true);
     hiloInterrupcion.start();
 
-    // El hilo principal hace la cuenta regresiva
     for (int i = 3; i > 0; i--) {
       System.out.print(i + "... ");
+      System.out.flush();
       Thread.sleep(1000);
     }
     System.out.println("\n¡Iniciando procesamiento!\n");
 
     Path rutaSalida = SelectorDestino.pedirRutaAlUsuario("horarios.txt");
-
     if (rutaSalida == null) {
       System.out.println("Proceso cancelado por el usuario.");
       return;
@@ -59,19 +72,15 @@ public class Generador {
       return;
     }
 
-    /* Se reemplazo ARCHIVO_SALIDA por rutaSalida */
     try (BufferedWriter writer = Files.newBufferedWriter(
           rutaSalida,
           StandardOpenOption.CREATE,
-          StandardOpenOption.TRUNCATE_EXISTING
-          )) {
-
+          StandardOpenOption.TRUNCATE_EXISTING)) {
       escribirHorariosAlumnos(alumnos, writer);
       writer.newLine();
       escribirHorariosLibres(alumnos, writer);
           }
   }
-
   // =======================
   // Cargar alumnos
   // =======================
@@ -158,6 +167,15 @@ public class Generador {
     }
 
     pool.shutdown();
+
+    try {
+      if (!pool.awaitTermination(10, TimeUnit.SECONDS)) {
+        pool.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      pool.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
 
     return alumnos;
   }
